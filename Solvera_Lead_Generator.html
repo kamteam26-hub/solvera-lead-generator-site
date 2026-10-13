@@ -475,6 +475,8 @@
             <div class="button-row">
               <button class="btn btn-primary" id="crmSignInBtn" type="button">Sign in</button>
               <button class="btn" id="crmSignUpBtn" type="button">Create account</button>
+              <button class="btn" id="crmResetPasswordBtn" type="button">Reset password</button>
+              <button class="btn btn-primary hidden" id="crmUpdatePasswordBtn" type="button">Set new password</button>
               <button class="btn hidden" id="crmSignOutBtn" type="button">Sign out</button>
             </div>
           </div>
@@ -681,6 +683,7 @@
     const ghlSending = new Set();
     let supabaseConfig = loadSupabaseConfig();
     let supabaseSession = loadSupabaseSession();
+    let supabaseRecoveryToken = "";
     let crmWorkspaceId = "";
     let crmReady = false;
     let crmHydrating = false;
@@ -953,18 +956,76 @@
           password,
           data:{workspace_name:"Solvera Referral CRM"}
         });
+        $("crmPassword").value = "";
         if (result.access_token && result.user) {
           if (!persistSupabaseSession({...result,expires_at:Math.floor(Date.now() / 1000) + Number(result.expires_in || 3600)})) {
             setCrmStatus(crmStatusMessage, "error");
             return;
           }
-          $("crmPassword").value = "";
           await initializeCrmWorkspace();
         } else {
           setCrmStatus("Account created. Confirm your email, then sign in to continue.");
         }
       } catch (error) {
         console.error("CRM account creation failed:", error);
+        setCrmStatus(error.message, "error");
+      }
+    }
+    async function sendCrmPasswordReset() {
+      if (!supabaseConfig && !saveSupabaseConfig()) return;
+      const email = $("crmEmail").value.trim();
+      if (!email) {
+        setCrmStatus("Enter your CRM account email to request a password reset.", "error");
+        return;
+      }
+      try {
+        setCrmStatus("Requesting a password reset…");
+        const redirectUrl = new URL(location.href);
+        redirectUrl.hash = "";
+        await authRequest(`recover?redirect_to=${encodeURIComponent(redirectUrl.href)}`, {email});
+        setCrmStatus("If an account exists for this address, a password reset link has been sent.");
+      } catch (error) {
+        console.error("CRM password reset request failed:", error);
+        setCrmStatus(error.message, "error");
+      }
+    }
+    async function setRecoveredCrmPassword() {
+      const password = $("crmPassword").value;
+      if (!supabaseConfig || !supabaseRecoveryToken) {
+        setCrmStatus("Open the password reset link from your email first.", "error");
+        return;
+      }
+      if (password.length < 12) {
+        setCrmStatus("Choose a unique password with at least 12 characters.", "error");
+        return;
+      }
+      try {
+        setCrmStatus("Updating your CRM password…");
+        const response = await fetch(`${supabaseConfig.url}/auth/v1/user`, {
+          method:"PUT",
+          headers:{
+            apikey:supabaseConfig.anonKey,
+            Authorization:`Bearer ${supabaseRecoveryToken}`,
+            "Content-Type":"application/json",
+            Accept:"application/json"
+          },
+          body:JSON.stringify({password}),
+          signal:AbortSignal.timeout(20000)
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.msg || payload.message || payload.error_description || payload.error || `Supabase Auth returned HTTP ${response.status}.`);
+        }
+        $("crmPassword").value = "";
+        supabaseRecoveryToken = "";
+        history.replaceState(null, "", `${location.pathname}${location.search}#ghlSection`);
+        $("crmUpdatePasswordBtn").classList.add("hidden");
+        $("crmSignInBtn").classList.remove("hidden");
+        $("crmResetPasswordBtn").classList.remove("hidden");
+        $("crmPassword").autocomplete = "current-password";
+        setCrmStatus("Password updated. Sign in with your new password.");
+      } catch (error) {
+        console.error("CRM password update failed:", error);
         setCrmStatus(error.message, "error");
       }
     }
@@ -2180,6 +2241,8 @@
     });
     $("crmSignInBtn").addEventListener("click", signInToCrm);
     $("crmSignUpBtn").addEventListener("click", signUpForCrm);
+    $("crmResetPasswordBtn").addEventListener("click", sendCrmPasswordReset);
+    $("crmUpdatePasswordBtn").addEventListener("click", setRecoveredCrmPassword);
     $("crmSignOutBtn").addEventListener("click", signOutFromCrm);
     $("crmImportLocalBtn").addEventListener("click", importLocalLeadsToCrm);
     $("crmRefreshBtn").addEventListener("click", async () => {
@@ -2410,6 +2473,17 @@
       $("supabaseProjectUrl").value = supabaseConfig.url;
       $("supabaseAnonKey").value = supabaseConfig.anonKey;
     }
+    const authRedirectParams = new URLSearchParams(location.hash.slice(1));
+    if (authRedirectParams.get("type") === "recovery" && authRedirectParams.get("access_token")) {
+      supabaseRecoveryToken = authRedirectParams.get("access_token");
+      history.replaceState(null, "", `${location.pathname}${location.search}#ghlSection`);
+      $("crmSignInBtn").classList.add("hidden");
+      $("crmSignUpBtn").classList.add("hidden");
+      $("crmResetPasswordBtn").classList.add("hidden");
+      $("crmUpdatePasswordBtn").classList.remove("hidden");
+      $("crmPassword").autocomplete = "new-password";
+      $("crmPassword").placeholder = "New password (12 characters minimum)";
+    }
     ensureSavedLeadsMap();
     $("leadMapLink").href = "https://www.openstreetmap.org/#map=5/36.5/-119.5";
     render();
@@ -2420,6 +2494,7 @@
         ? "Supabase project configured. Sign in to load the shared CRM."
         : "Not connected. Configure Supabase and sign in to enable shared CRM and automation.");
     }
+    if (supabaseRecoveryToken) setCrmStatus("Enter a new unique password with at least 12 characters.");
   </script>
 </body>
 </html>
